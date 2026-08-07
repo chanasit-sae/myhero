@@ -1,17 +1,18 @@
-# SPEC.md — TripSmith (AI Travel Itinerary Planner)
+# SPEC.md — TripSmith (AI Travel Trip Planner)
 
 > เขียนสเปกก่อนลงมือ (Spec-Driven Development) ต่อยอดจาก Lab **GSP1150 · Introduction to Gemini 3**
-> ใช้ Gemini API ผ่าน Google Gen AI SDK (`google-genai`)
+> ใช้ Gemini API ผ่าน Google Gen AI SDK (`google-genai`) · โมเดล **Gemini 3.1 Pro / Gemini 3.5 Flash**
 
 ## 1. แอปทำอะไร (Overview)
 
 **TripSmith** เป็นผู้ช่วยวางแผนทริปท่องเที่ยว ผู้ใช้กรอกปลายทาง + จำนวนวัน + เดือนที่ไป + ความสนใจ
 แล้วแอปจะ:
 
-1. **ค้นข้อมูลสด** ด้วย Google Search Grounding (เทศกาล/อีเวนต์/ทิปตามฤดูกาลของช่วงเวลานั้น)
-2. **สร้างแผนเที่ยวรายวัน** เป็น **JSON ที่มี schema ชัดเจน** เอาไปเรนเดอร์เป็น UI / เก็บลง DB ต่อได้ทันที
-3. เปิดโหมด **แชทหลายเทิร์น (multi-turn) + streaming** ให้ผู้ใช้ปรับแผนแบบโต้ตอบ real-time
-4. โหมดเสริม: เปรียบเทียบ **thinking_level** (low vs high) บนคำถามวางแผนที่ซับซ้อน
+1. **เช็คสภาพอากาศ** ด้วย **Function calling** (โมเดลเรียกฟังก์ชัน `get_weather` เอง — แบบเดียวกับใน Lab)
+2. **สร้างแผนเที่ยวรายวัน** เป็น **JSON ที่มี schema ชัดเจน** เอาไปทำเป็นหน้าเว็บ / เก็บลง DB ต่อได้ทันที
+3. **ดูรูปสถานที่** ด้วย **Multimodality** (ส่งรูป/URL ให้โมเดลช่วยดูว่าน่าไปไหม)
+4. เปิดโหมด **แชทหลายเทิร์น (multi-turn) + streaming** ให้ผู้ใช้ปรับแผนแบบโต้ตอบ real-time
+5. เทียบ **thinking_level** (low vs high) บนคำถามวางแผนที่ยาก
 
 ## 2. Input / Output
 
@@ -23,43 +24,46 @@
 | trip_month | str | "November" |
 | interests | list[str] | ["food", "temples", "photography"] |
 | budget_level | str | "mid" (low/mid/high) |
+| image (โหมด photo) | path/URL | "temple.jpg" |
 
 ### Output (Structured JSON — ดู schema ในหัวข้อ 4)
 - สรุปทริป + แผนรายวัน (ธีม, กิจกรรมเช้า/บ่าย/เย็น, ค่าใช้จ่ายโดยประมาณ)
-- ทิปการแพ็คของ + ประมาณค่าใช้จ่ายรวม
-- แหล่งอ้างอิง (citations) จาก Grounding
+- ทิปการแพ็คของ + ค่าใช้จ่ายรวมโดยประมาณ
 
 ## 3. Prompt + System Instruction Design
 
 ### System Instruction (กำหนดบทบาท/พฤติกรรม)
 ```
-You are TripSmith, a seasoned local travel guide with 15 years of experience.
-- Give practical, realistic itineraries — account for travel time between spots.
-- Respect the traveler's budget level and interests; never suggest closed/seasonal spots.
-- Prefer authentic local experiences over tourist traps.
-- Be concise. When asked for JSON, output ONLY valid JSON matching the schema.
+You are TripSmith, an experienced local travel guide.
+- Give practical, realistic trip plans — leave enough time to travel between places.
+- Match the traveler's budget and interests; don't suggest places that are closed or out of season.
+- Pick real local spots, not tourist traps.
+- Keep it short and clear. When asked for JSON, output ONLY valid JSON that matches the schema.
 ```
 
-### Prompt (insights — grounded)
-```
-Search for current, {trip_month}-specific travel information about {destination}:
-seasonal festivals/events, weather to expect, and 3 timely local tips.
-Return a tight bullet summary with concrete names and dates.
+### Function calling tool (แบบเดียวกับ get_weather ใน Lab)
+```python
+def get_weather(location: str) -> dict:
+    """Get the current weather in a specific location.
+    Args:
+        location: The city and country, e.g. Kyoto, Japan.
+    """
+    return {"location": location, "temperature": "18", "unit": "celsius", "sky": "clear"}
+# config=types.GenerateContentConfig(tools=[get_weather])  → โมเดลเรียกฟังก์ชันเอง
 ```
 
-### Prompt (itinerary — structured)
+### Prompt (trip plan — structured)
 ```
-Plan a {num_days}-day trip to {destination} in {trip_month}.
+Make a {num_days}-day trip plan for {destination} in {trip_month}.
 Traveler interests: {interests}. Budget: {budget_level}.
-Use these fresh insights when relevant:
-<<< {grounded_insights} >>>
-Produce a day-by-day itinerary as JSON per the provided schema.
+Current weather note: {weather}
+Return a day-by-day trip plan as JSON that matches the schema.
 ```
 
 ## 4. JSON Schema (Structured Output)
 
 ```
-Itinerary
+TripPlan
 ├─ destination: str
 ├─ trip_month: str
 ├─ num_days: int
@@ -77,22 +81,28 @@ Itinerary
 └─ estimated_total_cost_usd: float
 ```
 
-## 5. ฟีเจอร์จาก Lab ที่ใช้ (≥ 3)
+## 5. ฟีเจอร์จาก Lab GSP1150 ที่ใช้ (≥ 3)
 
-1. ✅ **System Instructions** — กำหนดบทบาทไกด์ท่องเที่ยว
-2. ✅ **Structured Output (JSON + schema)** — ผลลัพธ์แผนเที่ยวแบบ machine-readable
-3. ✅ **Grounding (Google Search)** — ดึงข้อมูลเทศกาล/สภาพอากาศล่าสุด
-4. ✅ (เสริม) **Multi-turn chat + Streaming** — ปรับแผนแบบโต้ตอบ real-time
-5. ✅ (เสริม) **thinking_level** — เทียบผล low vs high (Gemini 3)
+1. ✅ **System Instructions** — กำหนดบทบาทไกด์ท่องเที่ยว *(Lab)*
+2. ✅ **Function calling** — โมเดลเรียก `get_weather` เอง (แบบเดียวกับ Lab) *(Lab)*
+3. ✅ **Multimodality** — ส่งรูป/URL ให้โมเดลวิเคราะห์ (แบบ meal.png ใน Lab) *(Lab)*
+4. ✅ **Multi-turn chat + Streaming** — `chat.send_message_stream` *(Lab)*
+5. ✅ **thinking_level** — เทียบผล low vs high (Gemini 3) *(Lab)*
+6. ✅ **Structured Output (JSON + schema)** — ตามที่โจทย์กำหนด
+
+> หมายเหตุ: เวอร์ชันแรกเคยใช้ Grounding (Google Search) แต่ฟีเจอร์นั้นอยู่ใน Lab อื่น
+> (Modernize Website / Vertex AI Search) ไม่ใช่ GSP1150 จึงเปลี่ยนมาใช้ Function calling ที่อยู่ใน Lab นี้จริง
 
 ## 6. Temperature Strategy
 
 | งาน | temperature | เหตุผล |
 |-----|-------------|--------|
-| Insights (grounded) | 0.2 | ต้องแม่นยำ อิงข้อเท็จจริง ลด hallucination |
-| Itinerary generation | 0.7 | ต้องการความหลากหลาย/สร้างสรรค์ แต่ยังสมเหตุสมผล |
-| Chat refinement | 0.6 | สมดุลระหว่างความคิดสร้างสรรค์กับความสอดคล้อง |
+| Weather (function calling) | 0.2 | ต้องแม่นยำ อิงข้อเท็จจริง |
+| Trip plan | 0.7 | ต้องการความหลากหลาย/ไอเดียใหม่ แต่ยังสมเหตุสมผล |
+| Photo (multimodal) | 0.4 | บรรยายตามภาพจริง ไม่แต่งเกินจริง |
+| Chat | 0.6 | สมดุลระหว่างไอเดียใหม่กับความสอดคล้องกับแผนเดิม |
 
-## 7. ขอบเขต / Non-goals
+## 7. ขอบเขต / สิ่งที่แอปนี้ไม่ทำ
 - ไม่จองตั๋ว/โรงแรมจริง (แค่วางแผน)
-- ไม่รับประกันราคาตายตัว (เป็นค่าประมาณ)
+- ราคาเป็นค่าประมาณ ไม่ใช่ราคาจริงตายตัว
+- `get_weather` เป็น placeholder (ต่อ API อากาศจริงได้ภายหลัง)

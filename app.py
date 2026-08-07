@@ -1,13 +1,15 @@
-"""TripSmith — AI Travel Itinerary Planner.
+"""TripSmith — AI Travel Trip Planner.
 
-Built on Google Gen AI SDK (google-genai), extending Lab GSP1150 (Gemini 3).
-Features used: System Instructions, Structured Output (JSON schema),
-Grounding (Google Search), Multi-turn chat + streaming, thinking_level compare.
+Built on Google Gen AI SDK (google-genai), extending Lab GSP1150 (Introduction to Gemini 3).
+Lab features used: System Instructions, Function calling, Multimodality,
+Multi-turn chat + streaming, thinking_level. Plus Structured Output (JSON schema).
 """
 
 import argparse
 import json
+import mimetypes
 import os
+import urllib.request
 from enum import Enum
 
 from dotenv import load_dotenv
@@ -17,14 +19,15 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# Lab GSP1150 uses Gemini 3.1 Pro and Gemini 3.5 Flash.
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
 SYSTEM_INSTRUCTION = (
-    "You are TripSmith, a seasoned local travel guide with 15 years of experience.\n"
-    "- Give practical, realistic itineraries — account for travel time between spots.\n"
-    "- Respect the traveler's budget level and interests; never suggest closed/seasonal spots.\n"
-    "- Prefer authentic local experiences over tourist traps.\n"
-    "- Be concise. When asked for JSON, output ONLY valid JSON matching the schema."
+    "You are TripSmith, an experienced local travel guide.\n"
+    "- Give practical, realistic trip plans — leave enough time to travel between places.\n"
+    "- Match the traveler's budget and interests; don't suggest places that are closed or out of season.\n"
+    "- Pick real local spots, not tourist traps.\n"
+    "- Keep it short and clear. When asked for JSON, output ONLY valid JSON that matches the schema."
 )
 
 
@@ -49,7 +52,7 @@ class DayPlan(BaseModel):
     activities: list[Activity]
 
 
-class Itinerary(BaseModel):
+class TripPlan(BaseModel):
     destination: str
     trip_month: str
     num_days: int
@@ -66,53 +69,70 @@ def get_client() -> genai.Client:
     return genai.Client(api_key=api_key)
 
 
-# ---- Feature: Grounding (Google Search) ----
-def fetch_insights(client: genai.Client, destination: str, trip_month: str) -> tuple[str, list[str]]:
-    prompt = (
-        f"Search for current, {trip_month}-specific travel information about {destination}: "
-        "seasonal festivals/events, weather to expect, and 3 timely local tips. "
-        "Return a tight bullet summary with concrete names and dates."
-    )
-    config = types.GenerateContentConfig(
-        system_instruction=SYSTEM_INSTRUCTION,
-        temperature=0.2,  # factual accuracy over creativity
-        tools=[types.Tool(google_search=types.GoogleSearch())],
-    )
-    resp = client.models.generate_content(model=MODEL, contents=prompt, config=config)
+# ---- Feature: Function calling (lab get_weather pattern) ----
+def get_weather(location: str) -> dict:
+    """Get the current weather in a specific location.
 
-    citations: list[str] = []
-    meta = resp.candidates[0].grounding_metadata if resp.candidates else None
-    if meta and meta.grounding_chunks:
-        for chunk in meta.grounding_chunks:
-            if chunk.web and chunk.web.uri:
-                citations.append(f"{chunk.web.title or 'source'} — {chunk.web.uri}")
-    return resp.text or "", citations
+    Args:
+        location: The city and country, e.g. Kyoto, Japan.
+    """
+    # Placeholder for a real weather API call.
+    return {"location": location, "temperature": "18", "unit": "celsius", "sky": "clear"}
+
+
+def fetch_weather(client: genai.Client, destination: str) -> str:
+    resp = client.models.generate_content(
+        model=MODEL,
+        contents=f"What is the weather like in {destination} right now?",
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION,
+            temperature=0.2,  # facts, not creativity
+            tools=[get_weather],  # SDK auto-calls this Python function
+        ),
+    )
+    return resp.text or ""
 
 
 # ---- Feature: Structured Output (JSON + schema) ----
-def generate_itinerary(
+def generate_trip_plan(
     client: genai.Client,
     destination: str,
     num_days: int,
     trip_month: str,
     interests: list[str],
     budget_level: str,
-    insights: str,
-) -> Itinerary:
+    weather: str,
+) -> TripPlan:
     prompt = (
-        f"Plan a {num_days}-day trip to {destination} in {trip_month}.\n"
+        f"Make a {num_days}-day trip plan for {destination} in {trip_month}.\n"
         f"Traveler interests: {', '.join(interests)}. Budget: {budget_level}.\n"
-        f"Use these fresh insights when relevant:\n<<< {insights} >>>\n"
-        "Produce a day-by-day itinerary as JSON per the provided schema."
+        f"Current weather note: {weather}\n"
+        "Return a day-by-day trip plan as JSON that matches the schema."
     )
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
-        temperature=0.7,  # creative but coherent suggestions
+        temperature=0.7,  # some variety, but still makes sense
         response_mime_type="application/json",
-        response_schema=Itinerary,
+        response_schema=TripPlan,
     )
     resp = client.models.generate_content(model=MODEL, contents=prompt, config=config)
     return resp.parsed
+
+
+# ---- Feature: Multimodality (image, lab meal.png pattern) ----
+def analyze_photo(client: genai.Client, source: str, question: str) -> None:
+    if source.startswith(("http://", "https://")):
+        data = urllib.request.urlopen(source).read()
+    else:
+        with open(source, "rb") as f:
+            data = f.read()
+    mime = mimetypes.guess_type(source)[0] or "image/jpeg"
+    resp = client.models.generate_content(
+        model=MODEL,
+        contents=[types.Part.from_bytes(data=data, mime_type=mime), question],
+        config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, temperature=0.4),
+    )
+    print(resp.text)
 
 
 # ---- Feature: Multi-turn chat + Streaming ----
@@ -140,7 +160,7 @@ def chat_session(client: genai.Client) -> None:
         print("\n")
 
 
-# ---- Bonus: thinking_level comparison (Gemini 3) ----
+# ---- Feature: thinking_level (Gemini 3 reasoning control) ----
 def compare_thinking(client: genai.Client, question: str) -> None:
     for level in ("low", "high"):
         print(f"\n===== thinking_level = {level} =====")
@@ -152,42 +172,36 @@ def compare_thinking(client: genai.Client, question: str) -> None:
             )
             resp = client.models.generate_content(model=MODEL, contents=question, config=config)
             print(resp.text)
-        except Exception as e:  # thinking_level requires a Gemini 3 model
-            print(f"[skipped: {e}]\n(Set GEMINI_MODEL=gemini-3-pro-preview to use thinking_level.)")
+        except Exception as e:  # thinking_level needs a Gemini 3 model
+            print(f"[skipped: {e}]\n(Use a Gemini 3 model, e.g. GEMINI_MODEL=gemini-3.1-pro.)")
 
 
 def cmd_plan(args: argparse.Namespace) -> None:
     client = get_client()
     interests = [s.strip() for s in args.interests.split(",") if s.strip()]
 
-    print(f"Fetching current insights for {args.destination} ({args.month})...\n")
-    insights, citations = fetch_insights(client, args.destination, args.month)
-    print(insights)
-    if citations:
-        print("\nSources:")
-        for c in citations:
-            print(f"  - {c}")
+    print(f"Checking weather for {args.destination} (function calling)...\n")
+    weather = fetch_weather(client, args.destination)
+    print(weather)
 
-    print("\nGenerating itinerary...\n")
-    itinerary = generate_itinerary(
-        client, args.destination, args.days, args.month, interests, args.budget, insights
+    print("\nMaking your trip plan...\n")
+    plan = generate_trip_plan(
+        client, args.destination, args.days, args.month, interests, args.budget, weather
     )
-    print(json.dumps(itinerary.model_dump(), indent=2, ensure_ascii=False))
+    print(json.dumps(plan.model_dump(), indent=2, ensure_ascii=False))
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
-            json.dump(itinerary.model_dump(), f, indent=2, ensure_ascii=False)
+            json.dump(plan.model_dump(), f, indent=2, ensure_ascii=False)
         print(f"\nSaved to {args.out}")
 
 
-def cmd_insights(args: argparse.Namespace) -> None:
-    client = get_client()
-    insights, citations = fetch_insights(client, args.destination, args.month)
-    print(insights)
-    if citations:
-        print("\nSources:")
-        for c in citations:
-            print(f"  - {c}")
+def cmd_weather(args: argparse.Namespace) -> None:
+    print(fetch_weather(get_client(), args.destination))
+
+
+def cmd_photo(args: argparse.Namespace) -> None:
+    analyze_photo(get_client(), args.image, args.question)
 
 
 def cmd_chat(args: argparse.Namespace) -> None:
@@ -199,22 +213,26 @@ def cmd_thinking(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="TripSmith — AI Travel Itinerary Planner")
+    parser = argparse.ArgumentParser(description="TripSmith — AI Travel Trip Planner")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("plan", help="Full pipeline: grounded insights + structured itinerary")
+    p = sub.add_parser("plan", help="Full run: weather (function calling) + trip plan (JSON)")
     p.add_argument("destination")
     p.add_argument("--days", type=int, default=3)
     p.add_argument("--month", default="the upcoming season")
     p.add_argument("--interests", default="food, culture, nature")
     p.add_argument("--budget", default="mid", choices=["low", "mid", "high"])
-    p.add_argument("--out", help="Write itinerary JSON to this file")
+    p.add_argument("--out", help="Write the trip plan JSON to this file")
     p.set_defaults(func=cmd_plan)
 
-    p = sub.add_parser("insights", help="Grounded Google Search insights only")
+    p = sub.add_parser("weather", help="Weather via function calling (lab get_weather)")
     p.add_argument("destination")
-    p.add_argument("--month", default="the upcoming season")
-    p.set_defaults(func=cmd_insights)
+    p.set_defaults(func=cmd_weather)
+
+    p = sub.add_parser("photo", help="Analyze a place photo (multimodality)")
+    p.add_argument("image", help="Local path or image URL")
+    p.add_argument("question", nargs="?", default="What place is this and is it worth visiting?")
+    p.set_defaults(func=cmd_photo)
 
     p = sub.add_parser("chat", help="Multi-turn streaming chat")
     p.set_defaults(func=cmd_chat)
